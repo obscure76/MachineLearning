@@ -1,0 +1,604 @@
+head	1.2;
+access;
+symbols;
+locks
+	yschoe:1.2; strict;
+comment	@// @;
+
+
+1.2
+date	2000.01.30.14.55.55;	author yschoe;	state Exp;
+branches;
+next	1.1;
+
+1.1
+date	98.10.16.10.35.21;	author yschoe;	state Exp;
+branches;
+next	;
+
+
+desc
+@backprop test. This may not work now since netlayer has changed
+quite a bit.
+@
+
+
+1.2
+log
+@*** empty log message ***
+@
+text
+@//----------------------------------------------------------------------------
+// 
+//	file: xor1d.cc
+// 
+//	function: test bplayer.cc with an derived class that does xor 
+//	author:   Yoonsuck Choe <yschoe@@cs.utexas.edu>
+//	creation: Tue Jul 28 01:46:14 CDT 1998
+// 
+//	$Revision: 1.1 $ $Date: 1998/10/16 10:35:21 $
+//	$Log: backprop.cc,v $
+//	Revision 1.1  1998/10/16 10:35:21  yschoe
+//	Initial revision
+//
+//
+//----------------------------------------------------------------------------
+
+#include <nnview/real.h>
+#include <nnview/netlayer.h>
+#include <nnview/simulog.h>
+#include <nnview/real.h>
+#include <nnview/plot_window.h>
+#include <nnview/matrix_window.h>
+#include <nnview/tool_window.h>
+
+#define xor(x,y) (((x)==(y))?0:1)
+#define BETA 4.0
+
+//----------------------------------------------------------------------------
+//	CLASS: bplayer() 
+//	  - back prop layer
+//----------------------------------------------------------------------------
+enum BP_TYPE {BP_INP, BP_HID, BP_OUT};
+ 
+class bplayer : public netlayer {
+
+public:
+
+  REAL   **d ; 		// delta matrix
+  REAL   **teacher;	
+
+  REAL   **bias;	
+  REAL	 **prev_deltaw;
+
+  bplayer *upper;	// link to upper layer (for backprop)
+
+  BP_TYPE type;
+
+  virtual inline REAL act_func (REAL netinput);
+
+        bplayer(char *name, int cols, int rows, int max_inp, 
+		bplayer *feeding=NULL, int inp_cols=0, int inp_rows=0, 
+		int aff_rad=0, BP_TYPE type=BP_INP);
+        ~bplayer();
+
+        virtual inline REAL delta(int col, int row, int cur, int inp_col, int inp_row);
+	void bpdelta (int col, int row, int cur, int inp_col, int inp_row);
+	REAL error();
+	void backprop();
+ 	void init_bias(REAL low, REAL high);
+	void learn_bias();
+	void calc_netinput(int calc_aff);
+	void reset_delta();
+	void init_blackboard(char *name);
+ 	void add_upper_layer(bplayer *up) { upper = up; };
+
+};
+
+// Globals 
+
+main_window 	*mw;
+plot_window 	*pw ;
+plot_window 	*pw2 ;
+plot_window 	*pw3 ;
+matrix_window 	*matw;
+matrix_window 	*matw2;
+tool_window 	*tw;
+int 		steps;
+int iters = 101;
+	
+simulog *netlog;
+bplayer *input;
+bplayer *hidden;
+bplayer *output;
+
+char func_str[100];
+
+int boolean(int x, int y);
+
+//----------------------------------------------------------------------------
+//	bplayer() 
+//	  - bplayer::bplayer constructor
+//----------------------------------------------------------------------------
+bplayer::bplayer(char *name, int cols, int rows, int max_inp,
+		 bplayer *feeding=NULL, int inp_cols=0, int inp_rows=0, 			 int  aff_rad=0, BP_TYPE type=BP_INP)
+        : netlayer (name, cols, rows, 0, 0, max_inp, feeding,
+                    inp_cols, inp_rows, aff_rad) {
+
+  d	  = alloc_matrix(cols,rows);
+  teacher = alloc_matrix(cols,rows);
+  bias    = alloc_matrix(cols,rows);
+  prev_deltaw = alloc_matrix(cols,rows);
+  bplayer::type = type;
+
+  //init_weights();
+  init_weights(-0.5,0.5);
+  init_bias(-0.5,0.5);
+ 
+  // init prev_deltaw
+  for (int i=0; i<cols; ++i) 
+     for (int j=0; j<rows; ++j)
+	prev_deltaw[i][j] = 0.0;
+
+  cout << "done\n";
+}
+
+//----------------------------------------------------------------------------
+//	~bplayer() 
+//	  - bplayer::~bplayer destructor
+//----------------------------------------------------------------------------
+bplayer::~bplayer() {
+
+  delete_matrix(cols,rows,d);
+  delete_matrix(cols,rows,teacher);
+  delete_matrix(cols,rows,bias);
+  delete_matrix(cols,rows,prev_deltaw);
+
+}
+
+//----------------------------------------------------------------------------
+//	init_blackboard() 
+//	  - initialize blackboard
+//----------------------------------------------------------------------------
+void bplayer::init_blackboard(char *name) {
+
+  netlayer::init_blackboard(name);
+
+  net_bb->add("d",d,cols,rows);
+  net_bb->add("teacher",teacher,cols,rows);
+  net_bb->add("bias",bias,cols,rows);
+  net_bb->add("prev_deltaw",prev_deltaw,cols,rows);
+
+}
+
+
+//----------------------------------------------------------------------------
+//	calc_netinput() 
+//	  - calculate netinput , with bias
+//----------------------------------------------------------------------------
+void bplayer::calc_netinput(int calc_aff) {
+
+  //cout << "bplayer::calc_netinput\n";
+
+  netlayer::calc_netinput(calc_aff);
+
+  for (int i=0; i<cols; ++i)
+     for (int j=0; j<rows; ++j) 
+	net_input[i][j] += bias[i][j];	
+
+}
+
+//----------------------------------------------------------------------------
+//	act_func() 
+//	  - bplayer::act_func -- activation function
+//----------------------------------------------------------------------------
+inline REAL bplayer::act_func(REAL netinput) {
+
+  //cout << "bplayer::act_func\n";
+
+# ifdef DEBUG 
+  printf ("act_func(%f) = %f\n",netinput,1.0/(1.0+exp(-netinput)));
+# endif
+  REAL ret = 1.0/(1.0+exp(-BETA*netinput));
+  //REAL ret = tanh(netinput);
+
+  return ret;
+}
+
+#define gprime(x) (BETA*(x)*(1.0-(x)))
+//#define gprime(x) (1.0-(x)*(x))
+
+//----------------------------------------------------------------------------
+//	init_bias() 
+//	  - initialize bias
+//----------------------------------------------------------------------------
+void bplayer::init_bias(REAL low, REAL high) {
+
+  for (int i=0; i<cols; ++i)
+     for (int j=0; j<rows; ++j) 
+	bias[i][j] = drand48()*(high-low)+low;
+
+}
+
+//----------------------------------------------------------------------------
+//	learn_bias() 
+//	  - learn bias
+//----------------------------------------------------------------------------
+void bplayer::learn_bias() {
+
+  for (int i=0; i<cols; ++i)
+     for (int j=0; j<rows; ++j) 
+	bias[i][j] += alpha_affs[0] * d[i][j];
+
+}
+
+//----------------------------------------------------------------------------
+//	backprop() 
+//	  - backpropagate delta
+//----------------------------------------------------------------------------
+void bplayer::backprop() {
+
+  for (int i=0; i<cols; ++i) 
+     for (int j=0; j<rows; ++j) 
+	for (int x=0; x<rf_ranges[0][i][j].cols; ++x) 
+	   for (int y=0; y<rf_ranges[0][i][j].rows; ++y) 
+	     bpdelta(i,j,0,x+rf_ranges[0][i][j].lowx,y+rf_ranges[0][i][j].lowy);
+}
+
+
+//----------------------------------------------------------------------------
+//	reset_delta() 
+//	  - reset d[][]
+//----------------------------------------------------------------------------
+void bplayer::reset_delta() {
+  for (int i=0; i<cols; ++i) 
+     for (int j=0; j<rows; ++j) 
+	d[i][j] = 0.0;
+}
+
+//----------------------------------------------------------------------------
+//	bpdelta() 
+//	  - calculate deltas
+//----------------------------------------------------------------------------
+void bplayer::bpdelta (int col, int row, int cur, int inp_col, int inp_row) {
+
+  REAL alpha = alpha_affs[cur];
+  REAL DELTAcur;
+  REAL Gprime;
+
+
+  // col and inp_col is always 0.
+  if (type==BP_OUT) { // OUTPUT layer unit
+
+	// cout << "BP_OUT " << row << endl;
+	REAL Xi     = teacher[col][row];
+	REAL V      = output[col][row];
+	Gprime      = gprime(V*V);
+	DELTAcur    = Gprime * (Xi-V);
+#	ifdef DEBUG
+	printf("output  delta: %f*(%f-%f)=%f G*(Xi-V)\n",
+		Gprime,Xi,V,DELTAcur);
+#	endif
+
+  } else { // HIDDEN layer unit
+
+	// cout << "BP_HID " << row << endl;
+	REAL SUMwd = 0.0;
+	for (int i=0; i<upper->rows; ++i) {
+		int basex = upper->rf_ranges[0][0][i].lowx;
+		int basey = upper->rf_ranges[0][0][i].lowy;
+		REAL w = upper->wgt[0][i].aff_ws[0][col-basex][row-basey];
+		REAL DELTAprev = upper->d[0][i];
+#		ifdef DEBUG
+		printf(" %f*%f w * DELTAprev \n",w,DELTAprev);
+		SUMwd += w * DELTAprev;
+#		endif
+		
+        }
+	REAL V = output[col][row];
+	Gprime = gprime(V*V);
+	DELTAcur = Gprime * SUMwd;
+#	ifdef DEBUG
+	printf("hidden  delta: %f*%f=%f G*SUM(w*deltaprev)\n",
+		Gprime, SUMwd, DELTAcur);
+#	endif
+
+  }
+
+  d[col][row] =  DELTAcur;
+
+}
+
+
+//----------------------------------------------------------------------------
+//	delta() 
+//	  - calc delta Weights
+//----------------------------------------------------------------------------
+REAL bplayer::delta(int col, int row, int cur, int inp_col, int inp_row) {
+
+  if (cur!=0) return 0.0; // do this for the first incoming layer
+
+  REAL Gprime;
+  REAL alpha = alpha_affs[cur];
+  REAL DELTAcur = d[col][row];
+  REAL Vprev = feedings[0]->output[inp_col][inp_row];
+
+  REAL ret = alpha * DELTAcur * Vprev; // + 0.5 * prev_deltaw[col][row];
+
+  prev_deltaw[col][row] = ret;
+
+# ifdef DEBUG
+  printf("W[%d][%d] Vprv%d=%f G'%d=%f " 
+	 "DELTcur=%f deltW=%f\n", row,inp_row,inp_row,Vprev,
+	 row,Gprime, DELTAcur, ret);
+# endif
+
+  return ret;
+
+}
+
+//----------------------------------------------------------------------------
+//	error() 
+//	  - bplayer : output error sum
+//----------------------------------------------------------------------------
+REAL bplayer::error() {
+
+  REAL err = 0.0;
+
+  for (int i=0; i<rows; ++i)
+	err += (teacher[0][i]-output[0][i])*(teacher[0][i]-output[0][i]);
+
+  return err/2.0;
+}
+
+
+//----------------------------------------------------------------------------
+//	setup() 
+//	  - bplayer : setup network for simulation
+//----------------------------------------------------------------------------
+void setup() {
+
+  netlog = new simulog("xor.cc : simple backprop","xor.log");
+
+  // input layer
+  cout << "Initializing input layer.\n";
+  input = new bplayer("input",1,2,0,(bplayer *)NULL,0,0,0,BP_INP);
+
+  // hidden layer
+  cout << "Initializing hidden layer.\n";
+  hidden = new bplayer("hidden",1,2,2,input,1,2,2,BP_HID);
+
+  // output layer
+  cout << "Initializing output layer.\n";
+  output = new bplayer("output",1,2,1,input,1,2,2,BP_OUT);
+
+  // add output layer to hidden layer's input for backprop
+  hidden->add_upper_layer(output);
+
+  // set parameter values
+  hidden->set_parameter("set aff_contris[0] = 1.0");
+  hidden->set_parameter("set lat_exc_contri = 0.0");
+  hidden->set_parameter("set lat_inh_contri = 0.0");
+  hidden->set_parameter("set aff_noises[0] = 0.0");
+  hidden->set_parameter("set intrinsic_noise = 0.0");
+  hidden->set_parameter("set alpha_affs[0] = 0.1");
+  cout << "hidden alpha " << hidden->get_parameter("alpha_affs[0]") << endl;
+  
+  // set parameter values
+  output->set_parameter("set aff_contris[0] = 1.0");
+  output->set_parameter("set lat_exc_contri = 0.0");
+  output->set_parameter("set lat_inh_contri = 0.0");
+  output->set_parameter("set aff_noises[0] = 0.0");
+  output->set_parameter("set intrinsic_noise = 0.0");
+  output->set_parameter("set alpha_affs[0] = 0.1");
+  cout << "output alpha " << output->get_parameter("alpha_affs[0]") << endl;
+
+}
+
+//----------------------------------------------------------------------------
+//	run() 
+//	  - bplayer : run a certain number of backprop learning
+//----------------------------------------------------------------------------
+void run () {
+
+  static count=0;
+  REAL sum_error, err;
+  int success;
+
+  for (int i=0; i<steps; ++i) {
+
+   output->reset_delta();
+   hidden->reset_delta();
+   success = 0;
+   sum_error = 0.0;
+
+   for (int k=0; k<iters; ++k) {
+
+     int x = (count%4)%2;
+     int y = (count%4)/2;
+     //int x = (drand48()>0.5)?1:0;
+     //int y = (drand48()>0.5)?1:0;
+     // cout << "[count=" << count << "]--------------------------------" << endl;
+
+     // set input 
+     input->output[0][0] = (REAL)x;
+     input->output[0][1] = (REAL)y;
+
+     // set teacher output
+     if (boolean(x,y)) { // xor
+     	output->teacher[0][0] = 0.0;
+     	output->teacher[0][1] = 1.0;
+     } else {
+     	output->teacher[0][0] = 1.0;
+     	output->teacher[0][1] = 0.0;
+     }
+     
+     hidden->activate(1);
+     output->activate(1);
+
+     if (boolean(x,y)) {
+	if (output->output[0][1] > output->output[0][0]) {
+		success++;
+   	}
+     } else {
+	if (output->output[0][1] < output->output[0][0]) {
+		success++;
+   	}
+     }
+	 
+     //cout << "output->backprop()\n";
+     output->backprop();
+     //cout << "hidden->backprop()\n";
+     hidden->backprop();
+     count++;
+
+     sum_error += output->error();
+
+     matw->redraw();
+     matw2->redraw();
+
+     pw3->push_data(output->teacher[0][0]);
+     pw2->push_data(output->output[0][0]);
+     output->learn();
+     output->learn_bias();
+     hidden->learn();
+     output->learn_bias();
+   }
+     err=(REAL)(sum_error/(REAL)iters);
+     pw->push_data(err);
+
+
+     printf("%d inp= %1d %1d, sig(%f)=%f,%f {%.1f %.1f}, ", count,
+		int(input->output[0][0]), int(input->output[0][1]),
+		output->get_parameter("net_input[0][0]"), 
+		output->get_parameter("output[0][0]"),
+		output->get_parameter("output[0][1]"),
+		output->teacher[0][0],
+		output->teacher[0][1]);
+     printf("err %f ",err);
+     printf("hit %f\n",(REAL)(success/(REAL)iters));
+
+  }
+}
+
+//----------------------------------------------------------------------------
+//	set_scale() , set_scale2()
+//	  - scroll bar call backs
+//----------------------------------------------------------------------------
+scrollbar *scbr;
+void set_scale() {
+  matw->set_scale(scbr->value);
+  matw2->set_scale(scbr->value);
+}
+  
+scrollbar *scbr2;
+void set_scale2() {
+   steps = (int)scbr2->value;
+}
+
+scrollbar *scbr3;
+void set_scale3() {
+   // output->get_parameter("alpha_affs[0]") = (int)scbr3->value;
+   // hidden->get_parameter("alpha_affs[0]") = (int)scbr3->value;
+}
+
+
+//----------------------------------------------------------------------------
+//	boolean() 
+//	  - perform boolean function according to func_str
+//----------------------------------------------------------------------------
+int boolean(int x, int y) {
+
+  if (strcmp(func_str,"and")==0)
+ 	return (x&&y); 
+  else if (strcmp(func_str,"or")==0)
+	return (x||y);
+  else  
+	return xor(x,y);
+}
+  
+//----------------------------------------------------------------------------
+//
+//	main() 
+//	  - MAIN
+//
+//----------------------------------------------------------------------------
+int main (int argc, char *argv[]) {
+
+  if (argc==2) {
+  	strncpy(func_str,argv[1],strlen(argv[1])+1);
+  } else {
+  	strncpy(func_str,"xor",4);
+  }
+
+  mw = new main_window(func_str,600,600);
+
+
+  pw = new plot_window(*mw,600,150,0,0,0,10,COLOR,200,200);
+  pw2 = new plot_window(*mw,600,150,0,150,0,10,COLOR,100,100);
+  pw3 = new plot_window(*mw,600,150,0,300,0,10,COLOR,100,100);
+  
+  tw = new tool_window("weight",300,300,0,0);
+
+
+  callback_button *runit = new callback_button(*mw,"Run",run,
+                mw->width/4,20,mw->width/2,mw->height-20);
+
+  new quit_button(*mw,mw->width/4,20,mw->width*3/4,mw->height-20);
+
+  setup();
+
+  matw = new matrix_window(*tw,50,300,0,0,0,60,COLOR,1,2,
+		output->output[0] );
+
+  matw2 = new matrix_window(*tw,50,300,51,0,0,60,COLOR,1,2,
+		output->teacher[0] );
+
+  scbr = new scrollbar(*mw, &set_scale,mw->width/2,20,0,mw->height-20,
+                0.001,10.0,0.1,"scale=%.1lf");
+
+  scbr2 = new scrollbar(*mw, &set_scale2,mw->width/2,20,0,mw->height-40,
+                1,200,1,"Step=%3.0lf");
+
+  scbr3 = new scrollbar(*mw, &set_scale3,mw->width/2,20,0,mw->height-60,
+                0.0,1.0,0.1,"Eta=%.1lf");
+
+  steps = 1;
+
+  tw->toggle();
+
+  mw->main_loop();
+
+  delete netlog;
+}
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d9 5
+a13 2
+//	$Revision: $ $Date: $
+//	$Log$
+d61 1
+a61 1
+	void calc_netinput();
+d149 1
+a149 1
+void bplayer::calc_netinput() {
+d153 1
+a153 1
+  netlayer::calc_netinput();
+d291 1
+d301 2
+a302 2
+  printf("%s W[%d][%d] Vprv%d=%f G'%d=%f " 
+	 "DELTcur=%f deltW=%f\n", name, row,inp_row,inp_row,Vprev,
+d406 2
+a407 2
+     hidden->activate();
+     output->activate();
+@
